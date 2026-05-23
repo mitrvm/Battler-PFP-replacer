@@ -1,4 +1,4 @@
-export const DEBUG = false;
+export const DEBUG = true;
 
 export const AVATAR_SOURCE_SELECTOR =
   'img[src*="/profile_images/"], img[srcset*="/profile_images/"]';

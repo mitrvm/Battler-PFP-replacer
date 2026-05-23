@@ -4,11 +4,14 @@ import {
   DEBUG,
   EXTENSION_NAME,
 } from "../shared/config";
+import { DEFAULT_IMAGE_SELECTION } from "../shared/image-sets";
 import { getBundledAvatarUrls } from "../shared/avatar-images";
+import { getImageSelection, onImageSelectionChanged } from "../shared/storage";
 
 type ProcessRoot = Document | DocumentFragment | Element | HTMLImageElement;
 
 const PROFILE_IMAGE_PATTERN = /\/profile_images\//i;
+const OVERLAY_ATTRIBUTE = "data-battler-avatar-overlay";
 const RESERVED_PATH_SEGMENTS = new Set([
   "explore",
   "home",
@@ -21,7 +24,7 @@ const RESERVED_PATH_SEGMENTS = new Set([
   "tos",
 ]);
 
-const replacementUrls = getBundledAvatarUrls();
+let replacementUrls = getBundledAvatarUrls(DEFAULT_IMAGE_SELECTION);
 const replacementByUser = new Map<string, string>();
 
 function debugLog(message: string, details?: unknown): void {
@@ -99,15 +102,70 @@ function getReplacementUrl(userKey: string): string {
   return nextUrl;
 }
 
+function getOverlayHost(image: HTMLImageElement): HTMLElement | null {
+  if (image.parentElement instanceof HTMLElement) return image.parentElement;
+
+  return null;
+}
+
+function getOrCreateOverlay(host: HTMLElement): HTMLSpanElement {
+  const existingOverlay = host.querySelector<HTMLSpanElement>(
+    `[${OVERLAY_ATTRIBUTE}="true"]`,
+  );
+
+  if (existingOverlay) return existingOverlay;
+
+  const overlay = document.createElement("span");
+
+  overlay.setAttribute(OVERLAY_ATTRIBUTE, "true");
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.style.position = "absolute";
+  overlay.style.inset = "0";
+  overlay.style.display = "block";
+  overlay.style.pointerEvents = "none";
+  overlay.style.backgroundPosition = "center";
+  overlay.style.backgroundRepeat = "no-repeat";
+  overlay.style.backgroundSize = "cover";
+  overlay.style.zIndex = "1";
+
+  return host.appendChild(overlay);
+}
+
+function removeOverlay(host: HTMLElement): void {
+  host.querySelector(`[${OVERLAY_ATTRIBUTE}="true"]`)?.remove();
+}
+
+function restoreAvatar(image: HTMLImageElement): void {
+  const overlayHost = getOverlayHost(image);
+
+  if (overlayHost) removeOverlay(overlayHost);
+
+  image.style.opacity = "";
+  image.style.objectFit = "";
+  image.removeAttribute(DATA_ATTRIBUTE.replaced);
+  image.removeAttribute(DATA_ATTRIBUTE.userKey);
+  image.removeAttribute(DATA_ATTRIBUTE.originalSrc);
+  image.removeAttribute(DATA_ATTRIBUTE.replacementUrl);
+}
+
 function replaceAvatar(image: HTMLImageElement): void {
-  if (!isProfileAvatar(image)) return;
+  if (!isProfileAvatar(image)) {
+    restoreAvatar(image);
+    return;
+  }
+  if (replacementUrls.length === 0) {
+    restoreAvatar(image);
+    return;
+  }
 
   const userKey = getUserKey(image);
   const replacementUrl = getReplacementUrl(userKey);
+  const overlayHost = getOverlayHost(image);
 
+  if (!overlayHost) return;
   if (
     image.getAttribute(DATA_ATTRIBUTE.replacementUrl) === replacementUrl &&
-    getImageSource(image) === replacementUrl
+    overlayHost.querySelector(`[${OVERLAY_ATTRIBUTE}="true"]`)
   )
     return;
 
@@ -115,10 +173,15 @@ function replaceAvatar(image: HTMLImageElement): void {
   image.setAttribute(DATA_ATTRIBUTE.userKey, userKey);
   image.setAttribute(DATA_ATTRIBUTE.originalSrc, getImageSource(image));
   image.setAttribute(DATA_ATTRIBUTE.replacementUrl, replacementUrl);
-  image.src = replacementUrl;
-  image.srcset = replacementUrl;
-  image.style.objectFit = "cover";
 
+  if (getComputedStyle(overlayHost).position === "static")
+    overlayHost.style.position = "relative";
+
+  overlayHost.style.overflow = "hidden";
+  const overlay = getOrCreateOverlay(overlayHost);
+  overlay.style.backgroundImage = `url("${replacementUrl}")`;
+  image.style.opacity = "0";
+  image.style.objectFit = "cover";
   debugLog("Replaced avatar", { userKey, replacementUrl });
 }
 
@@ -139,13 +202,9 @@ function collectImages(root: ProcessRoot): HTMLImageElement[] {
 }
 
 export function startAvatarReplacement(): () => void {
-  if (replacementUrls.length === 0) {
-    console.warn(`[${EXTENSION_NAME}] No images were found.`);
-    return () => undefined;
-  }
-
   const pendingRoots = new Set<ProcessRoot>();
   let frameId: number | null = null;
+  let removeSelectionListener = (): void => undefined;
 
   const flush = (): void => {
     frameId = null;
@@ -162,6 +221,19 @@ export function startAvatarReplacement(): () => void {
     pendingRoots.add(root);
     if (frameId !== null) return;
     frameId = window.requestAnimationFrame(flush);
+  };
+
+  const updateReplacementPool = async (): Promise<void> => {
+    const selection = await getImageSelection();
+
+    replacementUrls = getBundledAvatarUrls(selection);
+    replacementByUser.clear();
+    schedule(document);
+
+    debugLog("Updated image selection", {
+      selection,
+      imagePoolSize: replacementUrls.length,
+    });
   };
 
   const observer = new MutationObserver((mutations) => {
@@ -188,7 +260,7 @@ export function startAvatarReplacement(): () => void {
     }
   });
 
-  schedule(document);
+  void updateReplacementPool();
   observer.observe(document.body, {
     childList: true,
     subtree: true,
@@ -196,8 +268,20 @@ export function startAvatarReplacement(): () => void {
     attributeFilter: ["src", "srcset"],
   });
 
+  removeSelectionListener = onImageSelectionChanged((selection) => {
+    replacementUrls = getBundledAvatarUrls(selection);
+    replacementByUser.clear();
+    schedule(document);
+
+    debugLog("Updated image selection", {
+      selection,
+      imagePoolSize: replacementUrls.length,
+    });
+  });
+
   const cleanup = (): void => {
     observer.disconnect();
+    removeSelectionListener();
 
     if (frameId !== null) window.cancelAnimationFrame(frameId);
 
