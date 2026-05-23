@@ -26,3 +26,9 @@ npm run dev
 ```
 
 Run `npm run build` for a production build.
+
+## Disclaimer
+
+This is a non-commercial fan project. I do not own the Umineko / Ushiromiya Battler images used here, and this project is not affiliated with or endorsed by 07th Expansion or any rights holders.
+
+If any rights holder would like this content removed, I will take it down upon request.
